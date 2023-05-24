@@ -1,4 +1,4 @@
-# vgae-dhp
+# VGAE-DHP
 # 1. Overview
 Implementation of VGAE for decoupling homophily and node popularity. 
 # 2. Requirements
