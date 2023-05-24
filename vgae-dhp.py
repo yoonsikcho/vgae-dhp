@@ -19,27 +19,25 @@ from torch_geometric.utils import (add_self_loops, negative_sampling,
 
 EPS = 1e-15
 MAX_LOGSTD = 10
-MAX_TEMP = 2.5
+MAX_TEMP = 2.0
 MIN_TEMP = 0.5
 COS_TEMP = 10.0
 BETA = 1.0
-MAX_BETA = 1.0
-MIN_BETA = 0
 
-beta = MIN_BETA 
+sc = 1.2
+beta = BETA
 
 decay_weight = np.log(MAX_TEMP/MIN_TEMP)
 decay_step = 100.0
-beta_decay_step = 100.0
 patience = 50
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--model', type=str, default='SVGNAE')
+parser.add_argument('--model', type=str, default='VGAEDHP')
 parser.add_argument('--dataset', type=str, default='Cora')
 parser.add_argument('--epochs', type=int, default=300)
-parser.add_argument('--channels', type=int, default=128)
+parser.add_argument('--channels', type=int, default=130)
 parser.add_argument('--scaling_factor', type=float, default=1.8)
-parser.add_argument('--training_rate', type=float, default=0.8) 
+parser.add_argument('--training_rate', type=float, default=0.85) 
 args = parser.parse_args()
 
 dev = torch.device('cuda')
@@ -67,63 +65,29 @@ class Encoder(torch.nn.Module):
         self.propagate = APPNP(K=1, alpha=0)
 
     def forward(self, x, edge_index,not_prop=0):
-        if args.model == 'GNAE':
-            x = self.linear1(x)
-            x = F.normalize(x,p=2,dim=1)  * args.scaling_factor
-            x = self.propagate(x, edge_index)
-            return x
-
-        if args.model == 'VGNAE':
-            x_ = self.linear1(x)
-            x_ = self.propagate(x_, edge_index)
-
-            x = self.linear2(x)
-            x[:,:2] = F.normalize(x[:,:2],p=2,dim=1) * args.scaling_factor
-            x[:,2:] = F.normalize(x[:,2:],p=2,dim=1) * args.scaling_factor
-            x[:,2:] = self.propagate(x[:,2:], edge_index)
-            return x, x_
         
-        if args.model == 'SVGNAE':
+        if args.model == 'VGAEDHP':
             x_ = self.linear1(x)
-            x_ = self.propagate(x_, edge_index)
+            e  = x_[:,:2]
+            f  = self.propagate(x_[:,2:],edge_index)
+            g_ = torch.cat((e,f),dim=1)
+            #x_ = self.propagate(x_, edge_index)
             
             x = self.linear2(x)
-            a = F.normalize(x[:,:2],p=2,dim=1) * args.scaling_factor/4
+            #a = x[:,:2]
+            a = F.normalize(x[:,:2],p=2,dim=1) * sc
             b = F.normalize(x[:,2:],p=2,dim=1) * args.scaling_factor
+            #a = self.propagate(a, edge_index)
             b = self.propagate(b, edge_index)
             c = torch.cat((a, b), dim=1)
-            return c, x_
-
+            return c, g_
     
-class StochasticWeight(torch.nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(StochasticWeight, self).__init__()
-        
-        self.linear1 = nn.Linear(in_channels, out_channels)
-        
-    def forward(self, x):
-        x =  self.linear1(x)#, self.linear2(x)
-        return torch.tanh(x)*2.5
-
-
-class VariationalGCNEncoder(torch.nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.conv1 = GCNConv(in_channels, 2 * out_channels)
-        self.conv_mu = GCNConv(2 * out_channels, out_channels)
-        self.conv_logstd = GCNConv(2 * out_channels, out_channels)
-
-    def forward(self, x, edge_index):
-        x = self.conv1(x, edge_index).relu()
-        return self.conv_mu(x, edge_index), self.conv_logstd(x, edge_index)
-
-    
-class SVGAE(torch.nn.Module):
+class VGAEDHP(torch.nn.Module):
     def __init__(self, encoder1, decoder):
         super().__init__()
         self.encoder1 = encoder1
         self.decoder = InnerProductDecoder() if decoder is None else decoder
-        SVGAE.reset_parameters(self)
+        VGAEDHP.reset_parameters(self)
 
     def reset_parameters(self):
         reset(self.encoder1)
@@ -135,14 +99,12 @@ class SVGAE(torch.nn.Module):
         self.__logstd1__ = self.__logstd1__.clamp(max=MAX_LOGSTD)
         z = self.reparametrize(self.__mu1__, self.__logstd1__)
         return z
-
     
     def reparametrize(self, mu, logstd):
         if self.training:
             return mu + torch.randn_like(logstd) * torch.exp(logstd)
         else:
-            return mu
-        
+            return mu 
     
     def test(self, z1, temp, pos_edge_index, neg_edge_index):
         r"""Given latent variables :obj:`z`, positive edges
@@ -227,33 +189,28 @@ class InnerProductDecoder2(torch.nn.Module):
     space produced by the encoder."""
     
     def forward(self, z1,  temp, edge_index, sigmoid=True, training=True, pos=True):
+            
         if training: 
             if pos: 
                 z11 = z1.detach().clone()
-                
-                vf = (z11[edge_index[0],2:] * z11[edge_index[1],2:]).sum(dim=1) #+ bias
-                
+                #z11 = z1
+                vf = (z11[edge_index[0],2:] * z11[edge_index[1],2:]).sum(dim=1) 
                 la = torch.cat(  (torch.unsqueeze(vf, 1), torch.zeros(torch.unsqueeze(vf, 1).shape).to(dev)   ),1)
-
                 la_ra = la
                 a = F.gumbel_softmax((la_ra), tau=temp, hard=True)[:,:1]
                 value_feature = (z1[edge_index[0],2:] * z1[edge_index[1],2:]).sum(dim=1)
-                value_network = z1[edge_index[0],[0]]  + z1[edge_index[1],[0]]
-
+                value_network =  z1[edge_index[0],[0]]*z1[edge_index[0],[0]]  + z1[edge_index[1],[0]]*z1[edge_index[1],[0]] - sc*sc
                 original_flag = torch.flatten(a)
                 return original_flag*torch.sigmoid(value_feature) + (1-original_flag)*torch.sigmoid(value_network),  a if sigmoid else value
             
             else:
                 z11 = z1.detach().clone()
-                #bbias = bias.detach().clone()
-                vf = (z11[edge_index[0],2:] * z11[edge_index[1],2:]).sum(dim=1)#+ bbias
+                vf = (z11[edge_index[0],2:] * z11[edge_index[1],2:]).sum(dim=1)
                 la = torch.cat(  (torch.unsqueeze(vf, 1), torch.zeros(torch.unsqueeze(vf, 1).shape).to(dev)   ),1)
                 la_ra = la
                 a = F.gumbel_softmax((la_ra), tau=temp, hard=True)[:,:1]
- 
                 value_feature = (z1[edge_index[0],2:] * z1[edge_index[1],2:]).sum(dim=1)
-                value_network = z1[edge_index[0],[0]]  + z1[edge_index[1],[0]] 
-
+                value_network =  z1[edge_index[0],[0]]*z1[edge_index[0],[0]]  + z1[edge_index[1],[0]]*z1[edge_index[1],[0]] - sc*sc
                 original_flag = torch.flatten(a)
                 return original_flag*torch.sigmoid(value_feature) + (1-original_flag)*torch.sigmoid(value_network) if sigmoid else value
                     
@@ -264,8 +221,8 @@ class InnerProductDecoder2(torch.nn.Module):
             la_ra = la
             a = F.softmax((la_ra), dim=1)[:,:1]
             value_feature = (z1[edge_index[0],2:] * z1[edge_index[1],2:]).sum(dim=1)
-            value_network = z1[edge_index[0],[0]]  + z1[edge_index[1],[0]] 
-            original_flag = torch.flatten(a)
+            value_network =  z1[edge_index[0],[0]]*z1[edge_index[0],[0]]  + z1[edge_index[1],[0]]*z1[edge_index[1],[0]] - sc*sc
+            original_flag = torch.flatten(a)            
             return original_flag*torch.sigmoid(value_feature) + (1-original_flag)*torch.sigmoid(value_network) if sigmoid else value
 
     def forward_all(self, z, sigmoid=True):
@@ -303,7 +260,6 @@ class EarlyStopping:
             self.save_checkpoint(val_loss, model)
         elif score < self.best_score + self.delta:
             self.counter += 1
-            #print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
             if self.counter >= self.patience:
                 self.early_stop = True
         else:
@@ -322,31 +278,24 @@ val_ratio = (1-args.training_rate) / 3
 test_ratio = (1-args.training_rate) / 3 * 2
 data = train_test_split_edges(data)
 all_link = data.train_pos_edge_index
-in_channels_w = dataset.num_features 
-out_channels_w = 1   
+
 
 N = int(data.x.size()[0])
-if args.model == 'GNAE':   
-    model = GAE(Encoder(data.x.size()[1], channels, data.train_pos_edge_index)).to(dev)
-if args.model == 'VGNAE':
-    model = VGAE(Encoder(data.x.size()[1], channels, data.train_pos_edge_index)).to(dev)
-if args.model == 'SVGNAE':
-    model = SVGAE(Encoder(data.x.size()[1], channels, data.train_pos_edge_index), InnerProductDecoder2()).to(dev)
+if args.model == 'VGAEDHP':
+    model = VGAEDHP(Encoder(data.x.size()[1], channels, data.train_pos_edge_index), InnerProductDecoder2()).to(dev)
 
 data.train_mask = data.val_mask = data.test_mask = data.y = None
 x, train_pos_edge_index = data.x.to(dev), data.train_pos_edge_index.to(dev)
-optimizer = torch.optim.Adam(model.parameters(), lr=0.005)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 
 network_input = torch.eye(x.shape[0]).to(dev)
 
 l1 = train_pos_edge_index
-l2 = train_pos_edge_index
 
 def train(epoch):
     temp = np.maximum(MAX_TEMP*np.exp(-(epoch-1)/decay_step*decay_weight), MIN_TEMP)
     
     global l1
-    global l2 
     
     beta = BETA
     model.train()
@@ -355,20 +304,16 @@ def train(epoch):
 
     loss,prob_edge = model.recon_loss(z1, temp, train_pos_edge_index)
 
-    if args.model in ['VGAE']:
-        loss = loss + (1 / data.num_nodes) * model.kl_loss()
-    if args.model in ['SVGNAE']:
-        loss = loss + (1.0 / data.num_nodes) * (model.kl_loss1())*beta
-    if args.model in ['SGNAE']:
-        loss = loss
+    loss = loss + (1.0 / data.num_nodes) * (model.kl_loss1())*beta
+
     loss.backward()
     optimizer.step()
-    return loss, [l1,l2]
+    return loss, l1
 
 def test(pos_edge_index, neg_edge_index, selected_list, plot_his=0):
     model.eval()
     with torch.no_grad():
-        z1 = model.encode1(x, selected_list[0])    
+        z1 = model.encode1(x, selected_list)    
     return model.test(z1, 1.0, pos_edge_index, neg_edge_index)
 
 
@@ -377,15 +322,12 @@ early_stopping = EarlyStopping(patience = patience, verbose = True)
 
 for epoch in range(1,args.epochs + 1):
     loss, selected_list  = train(epoch)
-    #loss  = train(epoch)
     loss = float(loss)
-    
-    
     ans = np.zeros( (x.shape[0],2))
     
     with torch.no_grad():
         val_pos, val_neg = data.val_pos_edge_index, data.val_neg_edge_index
-        auc, ap = test(data.val_pos_edge_index, data.val_neg_edge_index, selected_list)
+        auc, ap = test(val_pos, val_neg, train_pos_edge_index)
         if epoch>150:
             early_stopping(-auc, model)
             if early_stopping.early_stop:
@@ -395,11 +337,7 @@ for epoch in range(1,args.epochs + 1):
 model.load_state_dict(torch.load('checkpoint.pt'))
 
 
-val_pos, val_neg = data.val_pos_edge_index, data.val_neg_edge_index
-auc, ap = test(data.val_pos_edge_index, data.val_neg_edge_index,selected_list)
-
-
 test_pos, test_neg = data.test_pos_edge_index, data.test_neg_edge_index
-auc, ap = test(data.test_pos_edge_index, data.test_neg_edge_index,selected_list)
+auc, ap = test(test_pos, test_neg,train_pos_edge_index)
 
 print('Epoch: {:03d}, LOSS: {:.4f}, AUC: {:.4f} AP: {:.4f}'.format(epoch, loss, auc, ap))
