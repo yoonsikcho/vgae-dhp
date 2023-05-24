@@ -19,22 +19,22 @@ from torch_geometric.utils import (add_self_loops, negative_sampling,
 
 EPS = 1e-15
 MAX_LOGSTD = 10
-MAX_TEMP = 2.0
+MAX_TEMP = 2.5
 MIN_TEMP = 0.5
 COS_TEMP = 10.0
 BETA = 1.0
 
-sc = 1.2
+sc = 0.5
 beta = BETA
 
 decay_weight = np.log(MAX_TEMP/MIN_TEMP)
-decay_step = 100.0
+decay_step = 150.0
 patience = 50
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default='VGAEDHP')
 parser.add_argument('--dataset', type=str, default='Cora')
-parser.add_argument('--epochs', type=int, default=300)
+parser.add_argument('--epochs', type=int, default=800)
 parser.add_argument('--channels', type=int, default=130)
 parser.add_argument('--scaling_factor', type=float, default=1.8)
 parser.add_argument('--training_rate', type=float, default=0.85) 
@@ -71,13 +71,10 @@ class Encoder(torch.nn.Module):
             e  = x_[:,:2]
             f  = self.propagate(x_[:,2:],edge_index)
             g_ = torch.cat((e,f),dim=1)
-            #x_ = self.propagate(x_, edge_index)
             
             x = self.linear2(x)
-            #a = x[:,:2]
             a = F.normalize(x[:,:2],p=2,dim=1) * sc
             b = F.normalize(x[:,2:],p=2,dim=1) * args.scaling_factor
-            #a = self.propagate(a, edge_index)
             b = self.propagate(b, edge_index)
             c = torch.cat((a, b), dim=1)
             return c, g_
@@ -199,7 +196,8 @@ class InnerProductDecoder2(torch.nn.Module):
                 la_ra = la
                 a = F.gumbel_softmax((la_ra), tau=temp, hard=True)[:,:1]
                 value_feature = (z1[edge_index[0],2:] * z1[edge_index[1],2:]).sum(dim=1)
-                value_network =  z1[edge_index[0],[0]]*z1[edge_index[0],[0]]  + z1[edge_index[1],[0]]*z1[edge_index[1],[0]] - sc*sc
+                value_network =  z1[edge_index[0],[0]] + z1[edge_index[1],[0]]
+                #value_network =  z1[edge_index[0],[0]]*z1[edge_index[0],[0]]  + z1[edge_index[1],[0]]*z1[edge_index[1],[0]] - sc*sc
                 original_flag = torch.flatten(a)
                 return original_flag*torch.sigmoid(value_feature) + (1-original_flag)*torch.sigmoid(value_network),  a if sigmoid else value
             
@@ -210,7 +208,8 @@ class InnerProductDecoder2(torch.nn.Module):
                 la_ra = la
                 a = F.gumbel_softmax((la_ra), tau=temp, hard=True)[:,:1]
                 value_feature = (z1[edge_index[0],2:] * z1[edge_index[1],2:]).sum(dim=1)
-                value_network =  z1[edge_index[0],[0]]*z1[edge_index[0],[0]]  + z1[edge_index[1],[0]]*z1[edge_index[1],[0]] - sc*sc
+                value_network =  z1[edge_index[0],[0]] + z1[edge_index[1],[0]]
+                #value_network =  z1[edge_index[0],[0]]*z1[edge_index[0],[0]]  + z1[edge_index[1],[0]]*z1[edge_index[1],[0]] - sc*sc
                 original_flag = torch.flatten(a)
                 return original_flag*torch.sigmoid(value_feature) + (1-original_flag)*torch.sigmoid(value_network) if sigmoid else value
                     
@@ -221,7 +220,8 @@ class InnerProductDecoder2(torch.nn.Module):
             la_ra = la
             a = F.softmax((la_ra), dim=1)[:,:1]
             value_feature = (z1[edge_index[0],2:] * z1[edge_index[1],2:]).sum(dim=1)
-            value_network =  z1[edge_index[0],[0]]*z1[edge_index[0],[0]]  + z1[edge_index[1],[0]]*z1[edge_index[1],[0]] - sc*sc
+            value_network =  z1[edge_index[0],[0]] + z1[edge_index[1],[0]]
+            #value_network =  z1[edge_index[0],[0]]*z1[edge_index[0],[0]]  + z1[edge_index[1],[0]]*z1[edge_index[1],[0]] - sc*sc
             original_flag = torch.flatten(a)            
             return original_flag*torch.sigmoid(value_feature) + (1-original_flag)*torch.sigmoid(value_network) if sigmoid else value
 
@@ -286,9 +286,7 @@ if args.model == 'VGAEDHP':
 
 data.train_mask = data.val_mask = data.test_mask = data.y = None
 x, train_pos_edge_index = data.x.to(dev), data.train_pos_edge_index.to(dev)
-optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
-
-network_input = torch.eye(x.shape[0]).to(dev)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.005)
 
 l1 = train_pos_edge_index
 
@@ -328,7 +326,7 @@ for epoch in range(1,args.epochs + 1):
     with torch.no_grad():
         val_pos, val_neg = data.val_pos_edge_index, data.val_neg_edge_index
         auc, ap = test(val_pos, val_neg, train_pos_edge_index)
-        if epoch>150:
+        if epoch>200:
             early_stopping(-auc, model)
             if early_stopping.early_stop:
                 break
